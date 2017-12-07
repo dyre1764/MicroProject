@@ -53,7 +53,11 @@
 #include <p18cxxx.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
+#include <timers.h>
+#include <delays.h>
+#include <spi.h>
 #include "LCDroutinesEasyPic.h"
 #pragma config FOSC=HS1, PWRTEN=ON, BOREN=ON, BORV=2, PLLCFG=OFF
 #pragma config WDTEN=OFF, CCP2MX=PORTC, XINST=OFF
@@ -66,11 +70,15 @@ const rom far char LCDRow2[] = {0xC0,'P','T','=',0x00};
 char LCDRow1v[] = {0x82,'0','0','.','0','C',0x00};
 char LCDRow2v[] = {0xC3,'0','.','0','0','V',0x00};
 unsigned int Alive_count = 0;
-char *x;
-float temp;
-float volt;
-int type;
-int num;
+unsigned int lightcnt = 0;
+char x[3];
+char y, dummy;
+char dataH, dataL;
+int temp, volt, volt2;
+int type, num,j;
+int i=0;
+char r = '\r';
+char Buffer[];
 
 /******************************************************************************
  * Function prototypes
@@ -81,6 +89,11 @@ void LoPriISR(void);
 void TMR0handler(void);     // Interrupt handler for TMR0, typo in main
 void disptemp(void);    // function for display the temperature
 void disppt(void);      // function for displaying the potentiometer
+void wait500ms(void);   //function for a delay of 500ms
+void outread(void);     //function that does the lcd output and reads in values from sensors
+void Uartread(void);    //ouputs values vie uart
+void uarthandler(void); //reads in usart values in interrupt
+void spistuff(void);   // does spi stuff with dac
 
 #pragma code highVector=0x08
 void atHighVector(void)
@@ -103,7 +116,116 @@ void main() {
      Initial();                 // Initialize everything
       while(1) 
       {
-        if (ADCON0bits.GO==0) 
+          //read and output stuff to lcd.
+          outread();
+          
+          Delay100TCYx(10);
+          //Output using USART
+          if (j==1){
+              Uartread();
+              j=0;
+          } 
+          
+          //Send to DAC using SPI
+          spistuff();
+          
+      }// Sit here for ever
+     
+}
+/******************************************************************************
+ * Initial()
+ *
+ * This subroutine performs all initializations of variables and registers.
+ * It enables TMR0 and sets CCP1 for compare, and enables LoPri interrupts for
+ * both.
+ ******************************************************************************/
+void Initial() {
+    // Configure the IO ports
+    TRISA = 0b11101111;
+    LATA = 0;
+    TRISD  = 0b00001111;
+    LATD = 0;
+    TRISC  = 0b11111111;
+    LATC = 0;
+    
+    // Configure the LCD pins for output. Defined in LCDRoutines.h
+    LCD_RS_TRIS   = 0;              // 
+    LCD_E_TRIS    = 0;
+    LCD_DATA_TRIS = 0b11000000;     // Note the LCD is only on the upper nibble
+                                    // The lower nibble is all inputs
+    LCD_DATA_LAT = 0;           // Initialize LCD data LAT to zero
+
+    // Initialize the LCD and print to it
+    InitLCD();
+    DisplayC(LCDRow1);
+    DisplayC(LCDRow2);
+    DisplayV(LCDRow1v);
+    DisplayV(LCDRow2v);
+    
+    // Initializing TMR0
+    T0CON = 0b00000100;             // 8-bit, Fosc / 4, no pre/post scale timer
+    
+    //Turn on LEDS.
+    wait500ms();
+    LATDbits.LATD5=~LATDbits.LATD5;
+    wait500ms();
+    LATDbits.LATD5=~LATDbits.LATD5;
+    LATDbits.LATD6=~LATDbits.LATD6;
+    wait500ms();
+    LATDbits.LATD6=~LATDbits.LATD6;
+    LATDbits.LATD7=~LATDbits.LATD7;
+    wait500ms();
+    LATDbits.LATD7=~LATDbits.LATD7;
+    
+    // Initializing TMR0
+    T0CON = 0b01001000;             // 8-bit, Fosc / 4, no pre/post scale timer
+    TMR0L = 0;                      // Clearing TMR0 registers
+    TMR0H = 0;
+
+    // Configure the A/D for thermometer
+    ADCON0 = 0b00001101;
+    ADCON1 = 0b00000000;
+    ADCON2 = 0b10010101;
+    
+    // Configuring Interrupts
+    RCONbits.IPEN = 1;              // Enable priority levels
+    //CCP1CON = 0b01001011;           //setup capture mode 
+    INTCON2bits.TMR0IP = 0;         // Assign low priority to TMR0 interrupt
+    
+    IPR1bits.RC1IP = 0;
+    PIE1bits.RC1IE = 1;
+
+    INTCONbits.TMR0IE = 1;          // Enable TMR0 interrupts
+    INTCONbits.GIEL = 1;            // Enable low-priority interrupts to CPU
+    INTCONbits.GIEH = 1;            // Enable all interrupts
+
+    T0CONbits.TMR0ON = 1;           // Turning on TMR0
+    
+    //start adc for thermometer.
+    ADCON0bits.GO=1;
+    
+    //initialize Usart
+    BAUDCON1=0b00000000;
+    TXSTA1=0b00100100;
+    RCSTA1=0b10010000;
+    SPBRG1=51;
+    
+    //rcreg1=0;
+    
+    //initialize random numbers
+    num=0;
+    type=0;
+    
+    OpenSPI1(SPI_FOSC_4,MODE_01,SMPEND);
+
+}
+
+/*******************************************************************************
+ *outread
+ * subroutine that handles the reading in of sensors and potentiometer and outputs
+ to lcd.*/
+void outread(){
+    if (ADCON0bits.GO==0) 
         {
             if (num==1){ // this loop throws away first value that is wrong.
                 if (type==0){
@@ -126,69 +248,22 @@ void main() {
                 num++;
             }
             ADCON0bits.GO=1;
-        }// Sit here for ever
-     
-      }
+            
+            
+        }
 }
-/******************************************************************************
- * Initial()
- *
- * This subroutine performs all initializations of variables and registers.
- * It enables TMR0 and sets CCP1 for compare, and enables LoPri interrupts for
- * both.
- ******************************************************************************/
-void Initial() {
-    // Configure the IO ports
-    TRISA = 0b000001001;
-    LATA = 0;
-    TRISD  = 0b00001111;
-    LATD = 0;
-    TRISC  = 0b10010011;
-    LATC = 0;
-    
-    // Configure the LCD pins for output. Defined in LCDRoutines.h
-    LCD_RS_TRIS   = 0;              // 
-    LCD_E_TRIS    = 0;
-    LCD_DATA_TRIS = 0b11000000;     // Note the LCD is only on the upper nibble
-                                    // The lower nibble is all inputs
-    LCD_DATA_LAT = 0;           // Initialize LCD data LAT to zero
 
-    // Initialize the LCD and print to it
-    InitLCD();
-    DisplayC(LCDRow1);
-    DisplayC(LCDRow2);
-    DisplayV(LCDRow1v);
-    DisplayV(LCDRow2v);
-    
-    // Initializing TMR0
-    T0CON = 0b01001000;             // 8-bit, Fosc / 4, no pre/post scale timer
-    TMR0L = 0;                      // Clearing TMR0 registers
-    TMR0H = 0;
+/*******************************************************************************
+ *wait500ms
+ *subroutine to wait 5000ms*/
 
-    // Configure the A/D for thermometer
-    ADCON0 = 0b00001101;
-    ADCON1 = 0b00000000;
-    ADCON2 = 0b10010101;
+void wait500ms(){
+        WriteTimer0(65536-62500);//delay for total loop time of 1 ms
+		T0CONbits.TMR0ON = 1;           // Turning on TMR0
+        while(ReadTimer0()>0){
+        }
+        INTCONbits.TMR0IF = 0;      //Clear flag and return to polling routine
     
-    // Configuring Interrupts
-    RCONbits.IPEN = 1;              // Enable priority levels
-    INTCON2bits.TMR0IP = 0;         // Assign low priority to TMR0 interrupt
-
-    INTCONbits.TMR0IE = 1;          // Enable TMR0 interrupts
-    INTCONbits.GIEL = 1;            // Enable low-priority interrupts to CPU
-    INTCONbits.GIEH = 1;            // Enable all interrupts
-
-    T0CONbits.TMR0ON = 1;           // Turning on TMR0
-    
-    //start adc for thermometer.
-    ADCON0bits.GO=1;
-    
-    //initialize Eusart
-    SPEN.RCSTA1=1;
-    
-    //initialize random numbers
-    num=0;
-    type=0;
 }
 
 /*******************************************************************************
@@ -196,89 +271,20 @@ void Initial() {
  * subroutine to display the temperature
  */
 void disptemp(){
-        temp=ADRES*0.806*10; //read in thermometer and convert.
-        if(temp>999){//check to see if 1st digit exists
-            itoa(temp,x);
-            LCDRow1v[1]=*x;//displays 1st digit
-            //calculate 2nd digit if 1st existed
-            if (temp<2000)
-            {
-                temp=temp-1000;
-            } else if (temp<3000)
-            {
-                temp=temp-2000;
-            }else if (temp<4000)
-            {
-                temp=temp-3000;
-            }else if (temp<5000)
-            {
-                temp=temp-4000;
-            }else if (temp<6000)
-            {
-                temp=temp-5000;
-            }else if (temp<7000)
-            {
-                temp=temp-6000;
-            }else if (temp<8000)
-            {
-                temp=temp-7000;
-            }else if (temp<9000)
-            {
-                temp=temp-8000;
-            }else if (temp<10000){
-                temp=temp-9000;
-            }
-            if(temp>99){//check to see if 2nd digit exists(in case where 1st digit existed)
-                itoa(temp,x);
-                LCDRow1v[2]=*x;
-            }else if(temp>9.99){ //sets value to 0 if second digit exists
-                LCDRow1v[2]='0';
-            }
-        }else if(temp>99){ // checks to see if 2nd digit exists
+        temp=ADRES*0.806; //read in thermometer and convert.
+        itoa(temp,x);
+        if (temp>100){
+            LCDRow1v[1]=x[0];
+            LCDRow1v[2]=x[1];
+            LCDRow1v[4]=x[2];
+        }else if (temp>10){
             LCDRow1v[1]='0';
-            itoa(temp,x);
-            LCDRow1v[2]=*x;    
-        }else{ //sets everything to 0, if the values are 0
-           LCDRow1v[1]='0';
-            LCDRow1v[3]='0'; 
-        }
-        if(temp>99){ //check to see if 2nd digit existed, so we can display 3rd digit
-            //calculate 3rd digit
-            if (temp<200)
-            {
-                temp=temp-100;
-            } else if (temp<300)
-            {
-                temp=temp-200;
-            }else if (temp<400)
-            {
-                temp=temp-300;
-            }else if (temp<500)
-            {
-                temp=temp-400;
-            }else if (temp<600)
-            {
-                temp=temp-500;
-            }else if (temp<700)
-            {
-                temp=temp-600;
-            }else if (temp<800)
-            {
-                temp=temp-700;
-            }else if (temp<900)
-            {
-                temp=temp-800;
-            }else if (temp<1000){
-                temp=temp-900;
-            }
-            itoa(temp,x);
-            LCDRow1v[4]=*x;
-        }else if(temp>9.99){//check to see if third digit exists, and outputs if it does(case where 1st digit exists, but not hte second)
-            itoa(temp,x);
-            LCDRow1v[4]=*x;
-        }else //sets value to zero if 3rd digit is to small to exist
-        {
-            LCDRow1v[4]='0';
+            LCDRow1v[2]=x[0];
+            LCDRow1v[4]=x[1];
+        }else{
+            LCDRow1v[1]='0';
+            LCDRow1v[2]='0';
+            LCDRow1v[4]=x[1];
         }
         DisplayV(LCDRow1v); //disp to lcd
     
@@ -291,95 +297,93 @@ void disptemp(){
  */
 void disppt( ){
         volt=ADRES*0.806; //read in thermometer and convert.
-        if(volt>1000){ //check to see if value exists in the ones place.
-            itoa(volt,x); //if it does, export the value to lcd
-            LCDRow2v[1]=*x;
-            //find what value is, so we can display the next digit
-            if (volt<2000)
-            {
-                volt=volt-1000;
-            } else if (volt<3000)
-            {
-                volt=volt-2000;
-            }else if (volt<4000)
-            {
-                volt=volt-3000;
-            }else if (volt<5000)
-            {
-                volt=volt-4000;
-            }else if (volt<6000)
-            {
-                volt=volt-5000;
-            }else if (volt<7000)
-            {
-                volt=volt-6000;
-            }else if (volt<8000)
-            {
-                volt=volt-7000;
-            }else if (volt<9000)
-            {
-                volt=volt-8000;
-            }else if (volt<10000){
-                volt=volt-9000;
-            }
-            //check to see if the 2nd digit exists after subtraction
-            if(volt>99){
-                itoa(volt,x);
-                LCDRow2v[3]=*x;
-            }else if (volt>9.99){
-                LCDRow2v[3]='0';
-            }
-        }else if(volt>99){//check to see if 2nd digit exists(assuming that first digit didnt)
-            LCDRow2v[1]='0';
-            itoa(volt,x);
-            LCDRow2v[3]=*x;
-        }else{ //case if onle thrid digit exits
-           LCDRow2v[1]='0';
-            LCDRow2v[3]='0'; 
+        itoa(volt,x);
+        if (volt>1000){
+            LCDRow2v[1]=x[0];
+            LCDRow2v[3]=x[1];
+            LCDRow2v[4]=x[2];
         }
-        if(volt>99){//check to see if 3rd digit exists
-            //calculate 3rd digit
-            if (volt<200)
-            {
-                volt=volt-100;
-            } else if (volt<300)
-            {
-                volt=volt-200;
-            }else if (volt<400)
-            {
-                volt=volt-300;
-            }else if (volt<500)
-            {
-                volt=volt-400;
-            }else if (volt<600)
-            {
-                volt=volt-500;
-            }else if (volt<700)
-            {
-                volt=volt-600;
-            }else if (volt<800)
-            {
-                volt=volt-700;
-            }else if (volt<900)
-            {
-                volt=volt-800;
-            }else if (volt<1000){
-                volt=volt-900;
-            }
-            itoa(volt,x);
-            LCDRow2v[4]=*x;//disp value to lcd
-        }else if(volt>9.99){//check to see if 3rd digit is nonzero(in case where 2nd digit didnt exist) 
-            itoa(volt,x);
-            LCDRow2v[4]=*x;
-        }else // set value to zero if it is less than 0.01
-        {
-            LCDRow2v[4]='0';
+        else if(volt>100){
+            LCDRow2v[1]='0';
+            LCDRow2v[3]=x[0];
+            LCDRow2v[4]=x[1];
+        }else {
+            LCDRow2v[1]='0';
+            LCDRow2v[3]='0';
+            LCDRow2v[4]=x[0];
         }
         DisplayV(LCDRow2v); //disp to lcd
     
-    
+}
+//Function to output values from board via uart.
+void Uartread(void){
+        if ( PIR1bits.TXIF != 0 ) {   // do 
+            char TEMP[]={'T','E','M','P','\r'};
+            char VOLT[]={'P','O','T','\r'};
+            if (memcmp(&Buffer,&TEMP,5)==0){
+                itoa(temp*9/5+320,x);
+                if(temp>100){
+                    TXREG1 = x[0];
+                } else{
+                    TXREG1='0';
+                }
+                Delay10TCYx(1000);
+                if(temp>10){
+                    TXREG1 = x[1];
+                } else{
+                    TXREG1='0';
+                }
+                Delay10TCYx(1000);
+                TXREG1='.';
+                Delay10TCYx(1000);
+                TXREG=x[2];
+                Delay10TCYx(1000);
+                TXREG='F';
+                Buffer[4]='n'; //stops code from outputting value every time key is pressed
+            }else if(memcmp(&Buffer,&VOLT,4)==0){
+                itoa(volt,x);
+                if(volt>1000){
+                    TXREG1 = x[0];
+                } else{
+                    TXREG1='0';
+                }
+                Delay10TCYx(1000);
+                TXREG1='.';
+                Delay10TCYx(1000);
+                if(volt>100){
+                    TXREG1 = x[1];
+                } else{
+                    TXREG1 = '0';
+                }
+                Delay10TCYx(1000);
+                TXREG=x[2];
+                Delay10TCYx(1000);
+                TXREG='V';
+                Buffer[3]='n'; //stops code from outputting value every time key is pressed
+            }
+            Delay10TCYx(1000);
+            TXREG=0b00001101;
+        }
 }
 
+
+//subroutine to handle spi output to dac
+void spistuff(void){
+    itoa(volt,dataL);
+    volt2=volt;
+    volt2 >> 8;   //get hi bit            
+    itoa(volt2,dataH);         
+    dataH | 0b00110000;   //add 0011
+    dataH & 0b00111111;   // add amplification.  
+    
+    WriteSPI1(dataL);               
+    while (!DataRdySPI1());           
+    ReadSPI1();                  
+    
+    WriteSPI1(dataH);        
+    while (!DataRdySPI1());     
+    ReadSPI1();                 
+}
 /******************************************************************************
  * HiPriISR interrupt service routine
  *
@@ -387,7 +391,6 @@ void disppt( ){
  ******************************************************************************/
 #pragma interrupt HiPriISR
 void HiPriISR() {
-    
 }	// Supports retfie FAST automatically
 
 /******************************************************************************
@@ -402,6 +405,9 @@ void LoPriISR() {
         if( INTCONbits.TMR0IF ) {
             TMR0handler();
             continue;
+        }
+        if (PIR1bits.RC1IF){
+            uarthandler();   
         }
         break;
     }
@@ -440,10 +446,45 @@ void LoPriISR() {
  * Handles Alive LED Blinking via counter
  ******************************************************************************/
 void TMR0handler() {
-    if( Alive_count < 4880 ) { Alive_count++; }
+    if( Alive_count < 1570 ) { Alive_count++; }
     else {
-        LATDbits.LATD4 = ~LATDbits.LATD4;
+        if(lightcnt==8){
+            LATDbits.LATD4 = ~LATDbits.LATD4;
+            lightcnt=50;
+        } else if(lightcnt==50){
+            LATDbits.LATD4 = ~LATDbits.LATD4;
+            lightcnt=0;
+        } else{
+            lightcnt++;
+        }
         Alive_count = 0;
     }
     INTCONbits.TMR0IF = 0;      //Clear flag and return to polling routine
+}
+
+void uarthandler(){
+    if (LATDbits.LATD7==1){
+        LATDbits.LATD7=0;
+    } else{
+        LATDbits.LATD7=1;
+    }
+        if( RCSTA1bits.FERR == 1 ) {
+            temp = RCREG1;    // Clear out RCREG1 to temp register & ignore       
+        return;}
+        if( RCSTA1bits.OERR == 1) {
+            RCSTA1bits.CREN = 0;
+            RCSTA1bits.CREN = 1;// Reset CREN will reset USART1
+        return;}
+        Buffer[i] = RCREG1;// Move RCREG1 data into an array
+        if (i < 4){
+            i++;
+        }
+        else {
+            i=0;
+        }
+        if (memcmp(RCREG1,r,1)==0){ //changes the index to zero if enter is pressed
+            i=0;
+        }
+        j=1;
+        PIR1bits.RC1IF = 0;
 }
